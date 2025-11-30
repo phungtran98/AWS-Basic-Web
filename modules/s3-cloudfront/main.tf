@@ -72,6 +72,61 @@ resource "aws_s3_object" "error_html" {
 #   signing_protocol                  = "sigv4"
 # }
 
+# Data source để tìm certificate đã tồn tại và đã validate (nếu có)
+data "aws_acm_certificate" "existing" {
+  count = var.certificate_domain != "" && var.acm_certificate_arn == "" ? 1 : 0
+
+  provider = aws.us_east_1
+
+  domain      = var.certificate_domain
+  statuses    = ["ISSUED"] # Chỉ lấy certificate đã được validate (ISSUED)
+  most_recent = true       # Lấy certificate mới nhất nếu có nhiều certificate
+}
+
+# ACM Certificate - Tạo mới chỉ khi chưa có certificate đã validate
+resource "aws_acm_certificate" "cloudfront_cert" {
+  count = var.create_certificate && var.certificate_domain != "" && var.acm_certificate_arn == "" ? 1 : 0
+
+  provider = aws.us_east_1
+
+  domain_name       = var.certificate_domain
+  validation_method = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+    ignore_changes        = [domain_name]
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.bucket_name}-cloudfront-cert"
+  })
+}
+
+# Local values để xác định certificate ARN nào sẽ dùng
+locals {
+  # Certificate ARN từ data source (certificate đã tồn tại và đã validate)
+  existing_cert_arn = var.certificate_domain != "" && var.acm_certificate_arn == "" ? (
+    try(data.aws_acm_certificate.existing[0].arn, "")
+  ) : ""
+  
+  # Certificate ARN từ resource mới tạo (có thể chưa validate)
+  new_cert_arn = var.create_certificate && var.certificate_domain != "" && var.acm_certificate_arn == "" && length(aws_acm_certificate.cloudfront_cert) > 0 ? aws_acm_certificate.cloudfront_cert[0].arn : ""
+  
+  # Certificate ARN được cung cấp trực tiếp (ưu tiên cao nhất)
+  provided_cert_arn = var.acm_certificate_arn
+  
+  # Certificate ARN cuối cùng sẽ dùng (ưu tiên: provided > existing > new)
+  acm_certificate_arn_to_use = local.provided_cert_arn != "" ? local.provided_cert_arn : (
+    local.existing_cert_arn != "" ? local.existing_cert_arn : local.new_cert_arn
+  )
+  
+  # Kiểm tra xem có certificate đã validate không
+  # provided_cert_arn: giả định đã validate (user cung cấp)
+  # existing_cert_arn: luôn đã validate (data source chỉ lấy ISSUED)
+  # new_cert_arn: có thể chưa validate
+  has_validated_cert = local.provided_cert_arn != "" || local.existing_cert_arn != ""
+}
+
 # CloudFront Distribution
 resource "aws_cloudfront_distribution" "s3_distribution" {
   enabled             = var.cloudfront_enabled
@@ -91,8 +146,9 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   }
 
   # Custom domain names (aliases)
-  # Set aliases nếu có certificate ARN (đã được validate)
-  aliases = var.acm_certificate_arn != "" ? var.cloudfront_aliases : []
+  # Chỉ set aliases nếu có certificate đã được validate
+  # Khi có acm_certificate_arn được cung cấp -> luôn dùng (giả định đã validate)
+  aliases = local.has_validated_cert ? var.cloudfront_aliases : []
 
   # Origin configuration - S3 static website hosting endpoint
   # Sử dụng website endpoint thay vì bucket domain để tận dụng static website hosting
@@ -157,24 +213,24 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   }
 
   # SSL Certificate configuration
-  # Lưu ý: CloudFront không thể dùng certificate chưa được validate
-  # Nếu certificate chưa validate, tạm thời dùng CloudFront default certificate
-  # Sau khi validate certificate, cần update CloudFront distribution để dùng custom certificate
+  # Logic tự động:
+  # 1. Nếu có acm_certificate_arn được cung cấp -> luôn dùng (giả định đã validate)
+  # 2. Nếu tìm thấy certificate đã validate (existing) -> dùng
+  # 3. Nếu không có -> dùng default certificate
 
-  # Option 1: Dùng certificate ARN có sẵn (đã được validate)
+  # Option 1: Dùng certificate ARN đã được validate
   dynamic "viewer_certificate" {
-    for_each = var.acm_certificate_arn != "" ? [1] : []
+    for_each = local.has_validated_cert ? [1] : []
     content {
-      acm_certificate_arn      = var.acm_certificate_arn
+      acm_certificate_arn      = local.acm_certificate_arn_to_use
       ssl_support_method       = "sni-only"
       minimum_protocol_version = "TLSv1.2_2021"
     }
   }
 
-  # Option 2: Tạm thời dùng CloudFront default certificate
-  # (Certificate mới tạo sẽ chưa được validate, nên không thể dùng ngay)
+  # Option 2: Dùng CloudFront default certificate (khi chưa có certificate đã validate)
   dynamic "viewer_certificate" {
-    for_each = var.acm_certificate_arn == "" ? [1] : []
+    for_each = !local.has_validated_cert ? [1] : []
     content {
       cloudfront_default_certificate = true
     }
