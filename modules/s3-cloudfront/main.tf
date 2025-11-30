@@ -152,10 +152,13 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
 
   # Origin configuration - S3 static website hosting endpoint
   # Sử dụng website endpoint thay vì bucket domain để tận dụng static website hosting
+  # Format: bucket-name.s3-website-region.amazonaws.com
+  # Đảm bảo map đúng với S3 static website hosting endpoint
   origin {
     domain_name = "${var.bucket_name}.s3-website-${data.aws_region.current.name}.amazonaws.com"
     origin_id   = "S3-${var.bucket_name}"
     # Không cần OAC khi dùng website endpoint (endpoint này public)
+    # Website endpoint chỉ hỗ trợ HTTP, không hỗ trợ HTTPS
     custom_origin_config {
       http_port              = 80
       https_port             = 443
