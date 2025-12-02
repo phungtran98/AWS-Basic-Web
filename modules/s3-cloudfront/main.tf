@@ -73,8 +73,11 @@ resource "aws_s3_object" "error_html" {
 # }
 
 # Data source để tìm certificate đã tồn tại và đã validate (nếu có)
+# Chỉ tìm kiếm khi create_certificate = false (không tạo mới, nên cần tìm certificate có sẵn)
+# Lưu ý: Nếu create_certificate = false và không tìm thấy certificate, sẽ báo lỗi
+# Trong trường hợp đó, nên set create_certificate = true hoặc cung cấp acm_certificate_arn
 data "aws_acm_certificate" "existing" {
-  count = var.certificate_domain != "" && var.acm_certificate_arn == "" ? 1 : 0
+  count = !var.create_certificate && var.certificate_domain != "" && var.acm_certificate_arn == "" ? 1 : 0
 
   provider = aws.us_east_1
 
@@ -105,8 +108,9 @@ resource "aws_acm_certificate" "cloudfront_cert" {
 # Local values để xác định certificate ARN nào sẽ dùng
 locals {
   # Certificate ARN từ data source (certificate đã tồn tại và đã validate)
-  existing_cert_arn = var.certificate_domain != "" && var.acm_certificate_arn == "" ? (
-    try(data.aws_acm_certificate.existing[0].arn, "")
+  # Chỉ lấy khi create_certificate = false (không tạo mới)
+  existing_cert_arn = !var.create_certificate && var.certificate_domain != "" && var.acm_certificate_arn == "" && length(data.aws_acm_certificate.existing) > 0 ? (
+    data.aws_acm_certificate.existing[0].arn
   ) : ""
   
   # Certificate ARN từ resource mới tạo (có thể chưa validate)
